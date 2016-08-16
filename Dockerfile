@@ -1,4 +1,5 @@
 FROM ubuntu:14.04
+MAINTAINER William Jimenez <wjimenez@chegg.com>
 RUN apt-get update && apt-get -y install python-setuptools build-essential python-dev libffi-dev libssl-dev
 RUN easy_install pip
 RUN pip install urllib3[secure]==1.15.1

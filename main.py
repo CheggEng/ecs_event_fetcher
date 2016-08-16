@@ -5,7 +5,8 @@ import datetime
 import pytz
 import sdb
 import os
-
+from botocore.exceptions import ClientError
+from utils import retry
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 CLOUDWATCH_LOG_GROUP = os.getenv("CLOUDWATCH_LOG_GROUP", "ecs_service_events")
@@ -29,14 +30,16 @@ stderr_logs.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname
 logger.addHandler(stderr_logs)
 
 
+@retry(exception_type=ClientError)
 def create_event_watchers():
     event_watchers = {}
     for cluster in ecs_cluster_enumerator():
         for service in ecs_service_enumerator(cluster):
-            event_watchers[cluster+"_"+service] = EcsEventWatcher(cluster, service)
+            event_watchers[cluster + "_" + service] = EcsEventWatcher(cluster, service)
     return event_watchers
 
 
+@retry(exception_type=ClientError)
 def ecs_cluster_enumerator():
     response = ecs.list_clusters()
     clusterArns = response['clusterArns']
@@ -44,6 +47,7 @@ def ecs_cluster_enumerator():
         yield cluster.split('/')[1]
 
 
+@retry(exception_type=ClientError)
 def ecs_service_enumerator(cluster):
     paginate = True
     next_token = ''
@@ -81,14 +85,17 @@ class EcsEventWatcher(object):
 
         # If not create the stream
         if len(stream['logStreams']) == 0:
-            logs.create_log_stream(
+            logger.info('Log stream not found for {}. Creating...'.format(self.log_stream))
+            create_log_stream_output = logs.create_log_stream(
                 logGroupName=CLOUDWATCH_LOG_GROUP,
                 logStreamName=self.log_stream
             )
+            logger.debug(create_log_stream_output)
+            # Describe it again to get the sequence token
             stream = logs.describe_log_streams(
-            logGroupName=CLOUDWATCH_LOG_GROUP,
-            logStreamNamePrefix=self.log_stream,
-        )
+                logGroupName=CLOUDWATCH_LOG_GROUP,
+                logStreamNamePrefix=self.log_stream,
+            )
 
         # Try to capture sequence token from describe_log_streams response
         # TODO figure out if we need to get sequence token when we first create the stream
@@ -97,6 +104,7 @@ class EcsEventWatcher(object):
                 logger.warn("Found more than one log stream in DescribeLogStreams call. {}".format(stream))
                 logger.debug(stream)
             self.sequence_token = stream['logStreams'][0]['uploadSequenceToken']
+            logger.debug('Logstream sequence token {}'.format(self.sequence_token))
         except KeyError:
             self.sequence_token = None
 
@@ -105,7 +113,10 @@ class EcsEventWatcher(object):
         if sdb_results:
             logger.debug("Found state in SDB for stream {}".format(self.log_stream))
             self.first_flushed_event = sdb_results['first_flushed_event']
+        else:
+            logger.debug("Did not find state in SDB for stream {}".format(self.log_stream))
 
+    @retry(exception_type=ClientError)
     def write_to_cloudwatch(self, event):
         # TODO batch these requests in chunks of 1,048,576 bytes or less
         logger.info('Writing to cloudwatch for log stream {}. Event ID {}'.format(self.log_stream, event['id']))
@@ -137,6 +148,7 @@ class EcsEventWatcher(object):
             self.write_to_cloudwatch(event)
         self.first_flushed_event = [x['id'] for x in events][0]
 
+    @retry(exception_type=ClientError)
     def process(self):
         new_events = ecs.describe_services(services=[self.service_name], cluster=self.cluster)['services'][0]['events']
         if not self.first_flushed_event:
