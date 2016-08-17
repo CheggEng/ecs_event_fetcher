@@ -2,7 +2,6 @@ import boto3
 import time
 import logging
 import datetime
-import pytz
 import sdb
 import os
 from botocore.exceptions import ClientError
@@ -121,11 +120,12 @@ class EcsEventWatcher(object):
     def write_to_cloudwatch(self, event):
         # TODO batch these requests in chunks of 1,048,576 bytes or less
         logger.info('Writing to cloudwatch for log stream {}. Event ID {}'.format(self.log_stream, event['id']))
+        # http://stackoverflow.com/a/796019/830426 - remove time zone from time zone aware DT obj
+        # Cloudwatch logs expects milliseconds since epoch
         event = {
             'timestamp': int((
-                                 event['createdAt'] - datetime.datetime(
-                                     1970, 1, 1, tzinfo=pytz.timezone('US/Pacific'))
-                             ).total_seconds()) * 1000,  # must be milliseconds since epoch
+                                 event['createdAt'].replace(tzinfo=None) -
+                                 datetime.datetime(1970, 1, 1)).total_seconds()) * 1000,
             'message': event['message']
         }
         if self.sequence_token:
