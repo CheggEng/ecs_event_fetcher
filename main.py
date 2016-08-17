@@ -78,13 +78,13 @@ class EcsEventWatcher(object):
         self.sdb_key_name = cluster_name + "_" + service_name
 
         # Check if stream exists already
-        stream = logs.describe_log_streams(
+        streams = logs.describe_log_streams(
             logGroupName=CLOUDWATCH_LOG_GROUP,
             logStreamNamePrefix=self.log_stream,
         )
 
         # If not create the stream
-        if len(stream['logStreams']) == 0:
+        if len(streams['logStreams']) == 0:
             logger.info('Log stream not found for {}. Creating...'.format(self.log_stream))
             create_log_stream_output = logs.create_log_stream(
                 logGroupName=CLOUDWATCH_LOG_GROUP,
@@ -92,7 +92,7 @@ class EcsEventWatcher(object):
             )
             logger.debug(create_log_stream_output)
             # Describe it again to get the sequence token
-            stream = logs.describe_log_streams(
+            streams = logs.describe_log_streams(
                 logGroupName=CLOUDWATCH_LOG_GROUP,
                 logStreamNamePrefix=self.log_stream,
             )
@@ -100,10 +100,11 @@ class EcsEventWatcher(object):
         # Try to capture sequence token from describe_log_streams response
         # TODO figure out if we need to get sequence token when we first create the stream
         try:
-            if len(stream['logStreams']) > 1:  # We only expect to have one stream by this name
-                logger.warn("Found more than one log stream in DescribeLogStreams call. {}".format(stream))
-                logger.debug(stream)
-            self.sequence_token = stream['logStreams'][0]['uploadSequenceToken']
+            for stream in streams['logStreams']:
+                if stream['logStreamName'] == self.log_stream:
+                    self.sequence_token = stream['uploadSequenceToken']
+                else:
+                    self.sequence_token = None
             logger.debug('Logstream sequence token {}'.format(self.sequence_token))
         except KeyError:
             self.sequence_token = None
@@ -184,3 +185,4 @@ if __name__ == '__main__':
             except Exception as e:
                 logger.error(e)
         time.sleep(POLL_INTERVAL)
+
