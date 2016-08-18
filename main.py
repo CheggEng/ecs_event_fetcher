@@ -10,6 +10,7 @@ from utils import retry
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 CLOUDWATCH_LOG_GROUP = os.getenv("CLOUDWATCH_LOG_GROUP", "ecs_service_events")
 POLL_INTERVAL = os.getenv('POLL_INTERVAL', 60)
+CHECK_SERVICES_INTERVALS = os.getenv('CHECK_SERVICES_INTERVALS', 5)
 API_REQUEST_SPACING = os.getenv('API_REQUEST_SPACING', 0.2)
 SDB_DOMAIN = os.getenv('SDB_DOMAIN', 'ecs_service_events')
 ACCESS_KEY = os.getenv('ACCESS_KEY', None)
@@ -29,13 +30,35 @@ stderr_logs.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname
 logger.addHandler(stderr_logs)
 
 
-@retry(exception_type=ClientError)
 def create_event_watchers():
+    """
+    Enumerate all services in all clusters and create EcsEventWatcher objects for each
+    :return: dict. EcsEventWatcher objects
+    """
     event_watchers = {}
     for cluster in ecs_cluster_enumerator():
         for service in ecs_service_enumerator(cluster):
             event_watchers[cluster + "_" + service] = EcsEventWatcher(cluster, service)
     return event_watchers
+
+
+def create_event_watcher(cluster, service):
+    """
+    Create a single EcsEventWatcher object
+    :param cluster:
+    :param service:
+    :return: EcsEventWatcher
+    """
+    return EcsEventWatcher(cluster, service)
+
+
+def check_for_new_services(event_watchers):
+    new_event_watchers = []
+    for cluster in ecs_cluster_enumerator():
+        for service in ecs_service_enumerator(cluster):
+            if str(cluster) + "_" + str(service) not in event_watchers:
+                new_event_watchers.append((cluster, service))
+    return new_event_watchers
 
 
 @retry(exception_type=ClientError)
@@ -65,6 +88,16 @@ def ecs_service_enumerator(cluster):
             yield service.split('/')[1]
 
 
+@retry(exception_type=ClientError)
+def ecs_create_log_stream(**kwargs):
+    return logs.create_log_stream(**kwargs)
+
+
+@retry(exception_type=ClientError)
+def ecs_describe_log_streams(**kwargs):
+    return logs.describe_log_streams(**kwargs)
+
+
 class EcsEventWatcher(object):
     def __init__(self, cluster_name, service_name):
         self.log_group = CLOUDWATCH_LOG_GROUP
@@ -77,7 +110,7 @@ class EcsEventWatcher(object):
         self.sdb_key_name = cluster_name + "_" + service_name
 
         # Check if stream exists already
-        streams = logs.describe_log_streams(
+        streams = ecs_describe_log_streams(
             logGroupName=CLOUDWATCH_LOG_GROUP,
             logStreamNamePrefix=self.log_stream,
         )
@@ -85,13 +118,13 @@ class EcsEventWatcher(object):
         # If not create the stream
         if len(streams['logStreams']) == 0:
             logger.info('Log stream not found for {}. Creating...'.format(self.log_stream))
-            create_log_stream_output = logs.create_log_stream(
+            create_log_stream_output = ecs_create_log_stream(
                 logGroupName=CLOUDWATCH_LOG_GROUP,
                 logStreamName=self.log_stream
             )
             logger.debug(create_log_stream_output)
             # Describe it again to get the sequence token
-            streams = logs.describe_log_streams(
+            streams = ecs_describe_log_streams(
                 logGroupName=CLOUDWATCH_LOG_GROUP,
                 logStreamNamePrefix=self.log_stream,
             )
@@ -176,6 +209,7 @@ class EcsEventWatcher(object):
 if __name__ == '__main__':
     logger.info("Creating event watchers...")
     event_watchers = create_event_watchers()
+    service_check_counter = 0
     while True:
         for k, v in event_watchers.iteritems():
             time.sleep(API_REQUEST_SPACING)
@@ -185,4 +219,12 @@ if __name__ == '__main__':
             except Exception as e:
                 logger.error(e)
         time.sleep(POLL_INTERVAL)
-
+        # check to see if new services had been added
+        if service_check_counter >= CHECK_SERVICES_INTERVALS:
+            logger.info('Checking for new services')
+            for service in check_for_new_services(event_watchers):
+                # we found new services
+                logger.info('Creating new event watcher for service {}_{}'.format(service[0], service[1]))
+                event_watchers[str(service[0]) + "_" + str(service[1])] = create_event_watcher(service[0], service[1])
+            service_check_counter = 0
+        service_check_counter += 1

@@ -9,6 +9,7 @@ logger = logging.getLogger('ecs_event_fetcher')
 
 retries = {}
 
+
 class MaxConnectionRetryException(Exception):
     """
     Too many connection retry events
